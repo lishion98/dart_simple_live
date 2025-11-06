@@ -1,93 +1,105 @@
-name: app-build-action
-#推送Tag时触发
+name: app-build-action-dev
+
 on:
+  workflow_dispatch:
   push:
-    tags:
-      - "tv_*"
+    branches:
+      - 'dev'
+
 jobs:
-  build-tv:
+  build-mac-ios-android:
     runs-on: macos-latest
     permissions:
       contents: write
     steps:
-      #签出代码 
       - uses: actions/checkout@v4
         with:
-          ref: master
-        
-      #APK签名设置
+          fetch-depth: 0
+
+      # APK签名设置（可选，如果 secrets 不存在可以注释掉）
       - name: Download Android keystore
-        id: android_tv_keystore
+        id: android_keystore
         uses: timheuer/base64-to-file@v1.2
         with:
           fileName: keystore.jks
-          encodedString: ${{ secrets.TV_KEYSTORE_BASE64 }}
+          encodedString: ${{ secrets.KEYSTORE_BASE64 }}
+
       - name: Create key.properties
         run: |
-          echo "storeFile=${{ steps.android_tv_keystore.outputs.filePath }}" > simple_live_tv_app/android/key.properties
-          echo "storePassword=${{ secrets.TV_STORE_PASSWORD }}" >> simple_live_tv_app/android/key.properties
-          echo "keyPassword=${{ secrets.TV_KEY_PASSWORD }}" >> simple_live_tv_app/android/key.properties
-          echo "keyAlias=${{ secrets.TV_KEY_ALIAS }}" >> simple_live_tv_app/android/key.properties
+          echo "storeFile=${{ steps.android_keystore.outputs.filePath }}" > simple_live_app/android/key.properties
+          echo "storePassword=${{ secrets.STORE_PASSWORD }}" >> simple_live_app/android/key.properties
+          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> simple_live_app/android/key.properties
+          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> simple_live_app/android/key.properties
 
-      # 设置JAVA环境
+      # 设置Java
       - uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
-          java-version: "17"
-          cache: "gradle"
-    
-      #设置Flutter
-      - name: Flutter action
+          java-version: '17'
+          cache: 'gradle'
+
+      # 设置Flutter
+      - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.22.x'
           cache: true
 
-      #更新Flutter的packages
+      - name: Enable Flutter Mac Desktop
+        run: flutter config --enable-macos-desktop
+
       - name: Restore packages
         run: |
-          cd simple_live_tv_app
+          cd simple_live_app
           flutter pub get
-        
-      #打包APK
+
+      # flutter_distributor
+      - name: Install flutter_distributor
+        run: |
+          dart pub global activate flutter_distributor
+      - name: Setup PATH
+        run: echo "${HOME}/.pub-cache/bin" >> $GITHUB_PATH
+
+      # Build Android APK
       - name: Build APK
         run: |
-          cd simple_live_tv_app
+          cd simple_live_app
           flutter build apk --release --split-per-abi
-    
-      #上传APK至Artifacts
-      - name: Upload APK to Artifacts
+
+      - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
-          name: android_tv
-          path: |
-            simple_live_tv_app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-            simple_live_tv_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-            simple_live_tv_app/build/app/outputs/flutter-apk/app-x86_64-release.apk
-    
-      #读取版本信息
-      - name: Read version
-        id: version
-        uses: juliangruber/read-file-action@v1
+          name: android
+          path: simple_live_app/build/app/outputs/flutter-apk/*.apk
+
+      # Build iOS IPA
+      - name: Build IPA
+        run: |
+          cd simple_live_app
+          flutter build ios --release --no-codesign
+
+      - name: Package IPA
+        run: |
+          cd simple_live_app
+          mkdir -p build/ios/iphoneos/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ios/iphoneos/Payload/Runner.app
+          cd build/ios/iphoneos/
+          zip -q -r ios_no_sign.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
         with:
-          path: assets/tv_app_version.json
-      - name: Echo version
-        run: echo "${{ fromJson(steps.version.outputs.content).version }}"
-      - name: Echo version content
-        run: echo "${{ fromJson(steps.version.outputs.content).version_desc }}"
-    
-      #上传至Release
-      - name: Upload Release
-        uses: softprops/action-gh-release@v1
+          name: ios
+          path: simple_live_app/build/ios/iphoneos/ios_no_sign.ipa
+
+      # Build Mac
+      - name: Build Mac
+        run: |
+          cd simple_live_app
+          flutter_distributor package --platform macos --targets dmg,zip --skip-clean
+
+      - name: Upload Mac
+        uses: actions/upload-artifact@v4
         with:
-          name: "${{ fromJson(steps.version.outputs.content).version }}"
-          body: "# Android TV \n${{ fromJson(steps.version.outputs.content).version_desc }}"
-          prerelease: ${{ fromJson(steps.version.outputs.content).prerelease }}
-          token: ${{ secrets.TOKEN }}
-          files: |
-            simple_live_tv_app/build/app/outputs/flutter-apk/app-x86_64-release.apk
-            simple_live_tv_app/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-            simple_live_tv_app/build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-        
-      #完成
-      - run: echo "🍏 This job's status is ${{ job.status }}."
+          name: mac
+          path: simple_live_app/build/dist/*/*.dmg
